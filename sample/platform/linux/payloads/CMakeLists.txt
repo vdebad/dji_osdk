@@ -24,6 +24,19 @@ project(djiosdk-payloads-sample)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -pthread -g -O0 -Wall -Werror")
 
+# Try to see if user has OpenCV installed
+# if yes, default callback will display the image
+find_package( OpenCV QUIET )
+if (OpenCV_FOUND)
+    message( "\n${PROJECT_NAME}...")
+    message( STATUS "Found OpenCV installed in the system, will use it to display image in AdvancedSensing APIs")
+    message( STATUS " - Includes: ${OpenCV_INCLUDE_DIRS}")
+    message( STATUS " - Libraries: ${OpenCV_LIBRARIES}")
+    add_definitions(-DOPEN_CV_INSTALLED)
+else()
+    message( STATUS "Did not find OpenCV in the system, image data is inside RecvContainer as raw data")
+endif ()
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../core/inc)
 
 FILE(GLOB SOURCE_FILES
@@ -54,3 +67,9 @@ add_executable(payloads_download_sample
 add_executable(vde_camera_test
         vde_camera_test.cpp
         ${SOURCE_FILES})
+
+if (OpenCV_FOUND)
+    target_link_libraries(vde_camera_test
+            ${OpenCV_LIBS}
+            )
+endif ()
