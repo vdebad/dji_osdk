@@ -50,3 +50,7 @@ add_executable(payloads_async_sample
 add_executable(payloads_download_sample
         download_sample.cpp
         ${SOURCE_FILES})
+
+add_executable(vde_camera_test
+        vde_camera_test.cpp
+        ${SOURCE_FILES})
