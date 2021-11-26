@@ -63,6 +63,7 @@ class LinuxSetup : private Setup {
   }
 
  private:
+  using Setup::setupEnvironment; // required because of clang warning: 'LinuxSetup::setupEnvironment' hides overloaded virtual function
   uint32_t functionTimeout;
   Vehicle::ActivateData activateData;
   DJI_Environment* environment;
