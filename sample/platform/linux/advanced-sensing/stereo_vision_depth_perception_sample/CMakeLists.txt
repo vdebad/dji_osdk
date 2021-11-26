@@ -5,7 +5,7 @@ find_path(OPENCV_CONTRIB_IMG_PROC
         NAMES
         disparity_filter.hpp
         PATHS
-        /usr/include/opencv2/ximgproc
+        /usr/include/opencv4/opencv2/ximgproc
         /usr/local/include/opencv2/ximgproc
         /opt/local/include/opencv2/ximgproc
         /sw/include/opencv2/ximgproc
@@ -17,7 +17,7 @@ find_path(OPENCV_VIZ
         NAMES
         viz3d.hpp
         PATHS
-        /usr/include/opencv2/viz
+        /usr/include/opencv4/opencv2/viz
         /usr/local/include/opencv2/viz
         /opt/local/include/opencv2/viz
         /sw/include/opencv2/viz
@@ -52,10 +52,44 @@ if (OpenCV_FOUND)
     endif()
 else()
     find_package( OpenCV QUIET )
+    
     if (OpenCV_FOUND)
         message(STATUS "Found OpenCV ${OpenCV_VERSION} installed in the system, this sample requires 3.3.0+ for better experience")
         message(STATUS " - Includes: ${OpenCV_INCLUDE_DIRS}")
         add_definitions(-DOPEN_CV_INSTALLED)
+
+        find_path(  OPENCV_CONTRIB_IMG_PROC
+                    NAMES
+                        disparity_filter.hpp
+                    PATHS
+                        ${OpenCV_INCLUDE_DIRS}
+                    PATH_SUFFIXES
+                        opencv2/ximgproc
+        )
+
+        if(NOT OPENCV_CONTRIB_IMG_PROC STREQUAL OPENCV_CONTRIB_IMG_PROC-NOTFOUND)
+            message(STATUS "Found ximgproc module in OpenCV, will use it to filter disparity map in depth perception sample")
+            add_definitions(-DUSE_OPEN_CV_CONTRIB)
+        else()
+            message(STATUS "Did not find ximgproc in OpenCV")
+        endif()
+
+        find_path(  OPENCV_VIZ
+                    NAMES
+                        viz3d.hpp
+                    PATHS
+                        ${OpenCV_INCLUDE_DIRS}
+                    PATH_SUFFIXES
+                        opencv2/viz
+        )
+
+        if(NOT OPENCV_VIZ STREQUAL OPENCV_VIZ-NOTFOUND)
+            message(STATUS "Found viz3d in OpenCV, will use it to visualize point cloud")
+            set(FOUND_OPENCV_VIZ TRUE)
+        else()
+            message(STATUS "Did not find viz3d in OpenCV")
+        endif()
+
     else()
         message(STATUS "Did not find OpenCV in the system, image data is inside RecvContainer as raw data")
     endif()
@@ -77,7 +111,8 @@ set(MULTI_THREAD_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../stereo_vision_multi_t
 include_directories(utility)
 include_directories(${MULTI_THREAD_SAMPLE_DIR})
 
-if (OPEN_CV_3_3_0_INSTALLED AND FOUND_OPENCV_VIZ)
+#if (OPEN_CV_3_3_0_INSTALLED AND FOUND_OPENCV_VIZ)
+if (OpenCV_FOUND AND FOUND_OPENCV_VIZ)
     message(STATUS "Found OpenCV ${OpenCV_VERSION} and Viz3d module, stereo vision depth perception sample will be compiled.")
 
     FILE(GLOB DEPTH_PERCEPTION_SAMPLE_SOURCE_FILES
