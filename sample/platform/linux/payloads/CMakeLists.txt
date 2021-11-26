@@ -37,6 +37,17 @@ else()
     message( STATUS "Did not find OpenCV in the system, image data is inside RecvContainer as raw data")
 endif ()
 
+# find ffmpeg / libav stuff
+find_package(FFMPEG REQUIRED)
+
+if(FFMPEG_FOUND)
+        message( STATUS "Found FFmpeg ${FFMPEG_VERSION} installed in the system.")
+        message( STATUS " - Includes: ${FFMPEG_INCLUDE_DIRS}")
+        message( STATUS " - Libraries: ${FFMPEG_LIBRARIES}")
+else()
+        message("Cannot Find FFMPEG")
+endif(FFMPEG_FOUND)
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../core/inc)
 
 FILE(GLOB SOURCE_FILES
@@ -67,6 +78,14 @@ add_executable(payloads_download_sample
 add_executable(vde_camera_test
         vde_camera_test.cpp
         ${SOURCE_FILES})
+
+target_include_directories(vde_camera_test PUBLIC ${FFMPEG_INCLUDE_DIR})
+
+if (FFMPEG_FOUND)
+        target_link_libraries(vde_camera_test 
+                ${FFMPEG_LIBRARIES}
+        )
+endif()
 
 if (OpenCV_FOUND)
     target_link_libraries(vde_camera_test

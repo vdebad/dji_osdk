@@ -17,15 +17,21 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 // definition is not loaded from cmake automagically
 // hence definition is done manually in
 // c_cpp_properties.json
 #ifdef OPEN_CV_INSTALLED
-#include "opencv2/highgui/highgui.hpp"
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
+
 #include "opencv2/opencv.hpp"
 // using namespace cv;
 #endif
+
+#include <libavcodec/avcodec.h>
 
 // using namespace DJI::OSDK;
 // using namespace DJI::OSDK::Telemetry;
@@ -66,13 +72,28 @@ public:
 
 	DJI::OSDK::FilePackage file_list;
 
+	/**
+	 * @brief File handle for video recording.
+	 *
+	 */
+	FILE* p_video_file;
+
+	/** \brief Constructor.
+	 *
+	 * On Object instantiation init is called to initialize the camera.
+	 *
+	 * \param cm Pointer to CameraManger from vehicle object.
+	 * \param as Pointer to AdvancedSensing from vehicle object.
+	 */
+	AodCamera(DJI::OSDK::CameraManager* cm, DJI::OSDK::AdvancedSensing* as);
+
 	/** \brief Constructor.
 	 *
 	 * On Object instantiation init is called to initialize the camera.
 	 *
 	 * \param cm Pointer to CameraManger from vehicle object.
 	 */
-	AodCamera(DJI::OSDK::CameraManager* cm);
+	AodCamera(DJI::OSDK::CameraManager* cm) : AodCamera(cm, NULL){};
 
 	/** \brief Initialize Zenmuse H20T at payload position 0.
 	 *
@@ -149,6 +170,8 @@ public:
 	 * \param user_data Pointer to AodCanera object.
 	 */
 	static void fileDataCallback(E_OsdkStat ret_code, void* user_data);
+
+	static void videoStreamCallback(uint8_t* buf, int buf_len, void* user_data);
 
 	/** \brief Get the camera name as assigned during initialization.
 	 *
@@ -257,6 +280,16 @@ public:
 	std::string getNameOfFileInFileList(unsigned int file_list_index);
 
 	/** \brief 	Get the file from the camera identified by the given index of
+	 * 			the file list and save it under the specified file name.
+	 *
+	 * Evaluate last_err to check if download was initiated successfully.
+	 *
+	 * Asynchronous call. Once finished callback function is called and the
+	 * corresponding flag is set.
+	 */
+	void getFileFromCamera(unsigned int file_list_index, std::string file_name);
+
+	/** \brief 	Get the file from the camera identified by the given index of
 	 * 			the file list.
 	 *
 	 * Evaluate last_err to check if download was initiated successfully.
@@ -288,11 +321,34 @@ public:
 	 */
 	std::string sprintFileList();
 
+	//
+	// Video Functions
+	//
+
+	/**
+	 * @brief	Change source of h264 video stream.
+	 *
+	 * @param src Video stream source (wide, zoom, ir)
+	 */
+	void changeVideoSource(LiveView::LiveViewCameraSource src);
+
+	/**
+	 * @brief	Start h264 video stream.
+	 */
+	void startVideoStream();
+
+	/**
+	 * @brief	Stop h264 video stream.
+	 */
+	void stopVideoStream();
+
 private:
 	/** \brief 	Pointer to CameraManager as passed during instantiation of
 	 * 			AodCamera-object.
 	 */
 	DJI::OSDK::CameraManager* camera_manager;
+
+	DJI::OSDK::AdvancedSensing* advanced_sensing;
 
 	/** \brief Flag indicating if camera was successfully initialized. */
 	bool initialized;
@@ -304,10 +360,11 @@ private:
 	ErrorCode::ErrorCodeType last_err;
 };
 
-AodCamera::AodCamera(DJI::OSDK::CameraManager* cm)
+AodCamera::AodCamera(DJI::OSDK::CameraManager* cm,
+					 DJI::OSDK::AdvancedSensing* as)
 {
 	this->camera_manager = cm;
-
+	this->advanced_sensing = as;
 	// camera busy is cleared once camera is initialized successfully.
 	this->state = CameraState::CAMERA_BUSY;
 	this->work_mode = DJI::OSDK::CameraModule::WorkMode::WORK_MODE_UNKNOWN;
@@ -316,7 +373,7 @@ AodCamera::AodCamera(DJI::OSDK::CameraManager* cm)
 	this->file_list_updated = false;
 	this->file_data_transfer_done = false;
 	this->last_err = ErrorCode::SysCommonErr::Success;
-
+	this->p_video_file = NULL;
 	this->initialized = this->init();
 }
 
@@ -527,6 +584,8 @@ void AodCamera::shootPhotoCallback(DJI::OSDK::ErrorCode::ErrorCodeType ret_code,
 	ap->state = AodCamera::CameraState::CAMERA_READY;
 	ap->setLastError(ret_code);
 
+	DSTATUS("shootPhotoCallback return code: %lu", ret_code);
+
 	if (ret_code != ErrorCode::SysCommonErr::Success)
 	{
 		DERROR(
@@ -587,6 +646,15 @@ void AodCamera::fileDataCallback(E_OsdkStat ret_code, void* user_data)
 	ap->file_data_transfer_done = true;
 }
 
+void AodCamera::videoStreamCallback(uint8_t* buf, int buf_len, void* user_data)
+{
+	AodCamera* ap = (AodCamera*)user_data;
+
+	fwrite(buf, 1, buf_len, ap->p_video_file);
+
+	return;
+}
+
 unsigned int AodCamera::getNumberOfFilesInFileList()
 {
 	return this->file_list.media.size();
@@ -601,30 +669,39 @@ std::string AodCamera::getNameOfFileInFileList(unsigned int file_list_index)
 	return std::string();
 }
 
-void AodCamera::getFileFromCamera(unsigned int file_list_index)
+void AodCamera::getFileFromCamera(unsigned int file_list_index,
+								  std::string file_name)
 {
 	DSTATUS("Download file @ index %d", file_list_index);
 
 	DJI::OSDK::MediaFile file = this->file_list.media[file_list_index];
 
-	// create local file name
-	std::stringstream s_local_filename;
-	s_local_filename << "./" << file.fileName;
-
 	this->file_data_transfer_done = false;
 
-	this->last_err = this->camera_manager->startReqFileData(
-		DJI::OSDK::PAYLOAD_INDEX_0, file.fileIndex, s_local_filename.str(),
-		fileDataCallback, this);
-
-	if (this->last_err != ErrorCode::SysCommonErr::Success)
+	if (this->obtainDownloadRight())
 	{
-		DERROR(
-			"File Data Request failed using "
-			"'startReqFileData'. Error code: 0x%1X",
-			this->last_err);
-		ErrorCode::printErrorCodeMsg(this->last_err);
+		this->last_err = this->camera_manager->startReqFileData(
+			DJI::OSDK::PAYLOAD_INDEX_0, file.fileIndex, file_name,
+			fileDataCallback, this);
+
+		if (this->last_err != ErrorCode::SysCommonErr::Success)
+		{
+			DERROR(
+				"File Data Request failed using "
+				"'startReqFileData'. Error code: 0x%1X",
+				this->last_err);
+			ErrorCode::printErrorCodeMsg(this->last_err);
+		}
 	}
+}
+
+void AodCamera::getFileFromCamera(unsigned int file_list_index)
+{
+	// create local file name
+	std::stringstream s_local_filename;
+	s_local_filename << "./" << this->file_list.media[file_list_index].fileName;
+
+	this->getFileFromCamera(file_list_index, s_local_filename.str());
 }
 
 void AodCamera::getLastFileFromCamera()
@@ -651,6 +728,65 @@ std::string AodCamera::sprintFileList()
 	}
 
 	return ss.str();
+}
+
+void AodCamera::changeVideoSource(LiveView::LiveViewCameraSource src)
+{
+	if (this->advanced_sensing != NULL)
+	{
+		this->advanced_sensing->changeH264Source(
+			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1, src);
+	}
+	else
+	{
+		DERROR("Could not change video source due to null pointer!");
+	}
+}
+
+void AodCamera::startVideoStream()
+{
+	if (this->advanced_sensing != NULL)
+	{
+		this->p_video_file = fopen("./h20t_video.h264", "w");
+		if (this->p_video_file == NULL)
+		{
+			DERROR("Opening file for video recording failed!\n");
+			return;
+		}
+
+		LiveView::LiveViewErrCode err;
+		err = this->advanced_sensing->startH264Stream(
+			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1,
+			AodCamera::videoStreamCallback, this);
+
+		if (err != LiveView::LiveViewErrCode::OSDK_LIVEVIEW_PASS)
+		{
+			DERROR("Error starting H264 stream! Error code: 0x%1X", err);
+			ErrorCode::printErrorCodeMsg(err);
+		}
+	}
+	else
+	{
+		DERROR("Could not start video stream due to null pointer!");
+	}
+}
+
+void AodCamera::stopVideoStream()
+{
+	if (this->advanced_sensing != NULL)
+	{
+		this->advanced_sensing->stopH264Stream(
+			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1);
+
+		fflush(this->p_video_file);
+		fclose(this->p_video_file);
+	}
+	else
+	{
+		DERROR("Could not stop video source due to null pointer!");
+	}
+
+	this->p_video_file = NULL;
 }
 
 void show_rgb_image_cb(CameraRGBImage img, void* p)
@@ -693,137 +829,19 @@ std::string AodCamera::fileTypeEnum2String(DJI::OSDK::MediaFileType type)
 	}
 }
 
-int writeStreamData(const char* fileName, const uint8_t* data, uint32_t len)
+void opencvImgWaitkeyTask(bool& run)
 {
-	FILE* fp = NULL;
-	size_t size = 0;
-
-	fp = fopen(fileName, "a+");
-	if (fp == NULL)
+	while (run)
 	{
-		printf("fopen failed!\n");
-		return -1;
-	}
-	size = fwrite(data, 1, len, fp);
-	if (size != len)
-	{
-		fclose(fp);
-		return -1;
-	}
-
-	fflush(fp);
-	fclose(fp);
-
-	return 0;
-}
-
-void liveViewSampleCb(uint8_t* buf, int bufLen, void* userData)
-{
-	char filename[32] = "h20t_video.h264";
-	writeStreamData(filename, buf, bufLen);
-}
-
-// void fileMgrFileListCb(E_OsdkStat retCode, const FilePackage file_list,
-// 					   void* userData)
-// {
-// 	if (retCode != E_OsdkStat::OSDK_STAT_OK)
-// 	{
-// 		DERROR(
-// 			"Error receiving file list. Error code: "
-// 			"0x%1X",
-// 			retCode);
-// 	}
-// 	else
-// 	{
-// 		switch (file_list.type)
-// 		{
-// 		case DJI::OSDK::FileType::MEDIA:
-// 			DSTATUS("Media file.");
-// 			break;
-// 		case DJI::OSDK::FileType::COMMON:
-// 			DSTATUS("Common file.");
-// 			break;
-// 		case DJI::OSDK::FileType::SPEAKER_AUDIO:
-// 			DSTATUS("Audio file.");
-// 			break;
-// 		default:
-// 			DSTATUS("Unknown file type.");
-// 			break;
-// 		}
-
-// 		DSTATUS("Number of files: %d", file_list.media.size());
-
-// 		for (std::size_t i = 0; i < file_list.media.size(); ++i)
-// 		{
-// 			std::string fileType = {
-
-// 			};
-// 			std::cout << "File " << i << ": "
-// 					  << (file_list.media[i].valid ? "Valid" : "Invalid")
-// 					  << " File at index " << file_list.media[i].fileIndex
-// 					  << " named " << file_list.media[i].fileName << "("
-// 					  << fileTypeEnum2String(file_list.media[i].fileType) << ")"
-// 					  << endl;
-// 		}
-
-// 		cur_file_list = file_list;
-// 	}
-// }
-
-DJI::OSDK::CameraModule::WorkMode printCameraWorkMode(
-	DJI::OSDK::CameraManager* cm)
-{
-	// Get camera work mode
-	DSTATUS("Getting work mode of camera at payload index 0 (H20T)");
-
-	DJI::OSDK::CameraModule::WorkMode mode;
-	ErrorCode::ErrorCodeType ret =
-		cm->getModeSync(DJI::OSDK::PAYLOAD_INDEX_0, mode, 5);
-
-	if (ret != ErrorCode::SysCommonErr::Success)
-	{
-		DERROR("Could not get camera's work mode. Error code: 0x%1X", ret);
-		ErrorCode::printErrorCodeMsg(ret);
-	}
-	else
-	{
-		DSTATUS("Current work mode:");
-		switch (mode)
+		cv::Mat img = cv::imread("./__temp.jpg", cv::IMREAD_COLOR);
+		if (!img.empty())
 		{
-		case DJI::OSDK::CameraModule::WorkMode::SHOOT_PHOTO:
-			DSTATUS(
-				"Capture mode. In this mode, the user can capture "
-				"pictures.");
-			break;
-		case DJI::OSDK::CameraModule::WorkMode::RECORD_VIDEO:
-			DSTATUS("Record mode. In this mode, the user can record videos. ");
-			break;
-		case DJI::OSDK::CameraModule::WorkMode::PLAYBACK:
-			DSTATUS(
-				"Playback mode. In this mode, the user can preview photos "
-				"and videos, and can delete files.");
-			break;
-		case DJI::OSDK::CameraModule::WorkMode::MEDIA_DOWNLOAD:
-			DSTATUS(
-				"In this mode, the user can download media to the Mobile "
-				"Device.");
-			break;
-		case DJI::OSDK::CameraModule::WorkMode::BROADCAST:
-			DSTATUS(
-				"In this mode, live stream resolution and frame rate will "
-				"be 1080i50 (PAL) or 720p60 (NTSC). In this mode videos "
-				"can be recorded. Still photos can also be taken only when "
-				"video is recording. The only way to exit broadcast mode "
-				"is to change modes to RECORD_VIDEO. Only supported by "
-				"Inspire 2.");
-			break;
-		case DJI::OSDK::CameraModule::WorkMode::WORK_MODE_UNKNOWN:
-			DSTATUS("The camera's work mode is unknown.");
-			break;
+			// 4056 x 3040
+			cv::resize(img, img, cv::Size(1014, 760));
+			cv::imshow("Display Image", img);
 		}
+		cv::waitKey(100);  // using separate thread
 	}
-
-	return mode;
 }
 
 int main(int argc, char** argv)
@@ -845,30 +863,17 @@ int main(int argc, char** argv)
 
 	// Get CameraManager handle
 	CameraManager* cm = vehicle->cameraManager;
-	AodCamera aod_camera(vehicle->cameraManager);
+	AodCamera aod_camera(vehicle->cameraManager, vehicle->advancedSensing);
 
 	if (!aod_camera.isInitialized())
 		return 1;
 
 	DSTATUS("Camera module name: %s", aod_camera.getName());
 
-	if (false)	// camera stream
-	{
-		vehicle->advancedSensing->changeH264Source(
-			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1,
-			LiveView::LiveViewCameraSource::OSDK_CAMERA_SOURCE_H20T_ZOOM);
-
-		vehicle->advancedSensing->startH264Stream(
-			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1,
-			liveViewSampleCb, NULL);
-
-		DSTATUS("Sleeping 30 seconds while recording stream asynchronously.");
-		sleep(30);
-
-		vehicle->advancedSensing->stopH264Stream(
-			LiveView::LiveViewCameraPosition::OSDK_CAMERA_POSITION_NO_1);
-	}
-
+	// start thread to call waitkey vor opencv image display
+	bool run_thread = true;
+	thread t1(opencvImgWaitkeyTask, std::ref(run_thread));
+	std::string s;
 	while (true)
 	{
 		std::cout << std::endl;
@@ -876,9 +881,17 @@ int main(int argc, char** argv)
 		std::cout << "> [t] Take a picture" << std::endl
 				  << "> [l] List files on camera" << std::endl
 				  << "> [d] Download file from camera" << std::endl
+				  << "> [i] Display image from camera" << std::endl
+				  << "> [r] Record video from camera" << std::endl
+				  << "> [v] Camera live view" << std::endl
 				  << "> [q] Quit" << std::endl;
 		char user_input = 0;
-		std::cin >> user_input;
+		// std::cin >> user_input;
+		while (getline(cin, s) && !s.empty())
+		{
+			if (std::stringstream(s) >> user_input)
+				break;
+		}
 
 		switch (user_input)
 		{
@@ -911,14 +924,18 @@ int main(int argc, char** argv)
 			std::cout << aod_camera.sprintFileList() << std::endl;
 
 			break;
-		case 'd':
-			std::cout << "> Enter file index to download: ";
-			char user_file_idx = 0;
-			std::cin >> user_file_idx;
+		case 'd':  // download file
+		{
+			unsigned int user_file_idx = 0;
+			do
+			{
+				std::cout << "> Enter file index to download [0-"
+						  << aod_camera.getNumberOfFilesInFileList() - 1
+						  << "]: ";
+				std::cin >> user_file_idx;
+			} while (user_file_idx >= aod_camera.getNumberOfFilesInFileList());
 
-			// check if file index is in range
-			if ()
-				aod_camera.getFileFromCamera();
+			aod_camera.getFileFromCamera(user_file_idx);
 
 			if (aod_camera.getLastError() == ErrorCode::SysCommonErr::Success)
 			{
@@ -936,9 +953,115 @@ int main(int argc, char** argv)
 					DSTATUS("File download timed out!");
 			}
 			break;
-		case 'q':
+		}
+		case 'i':  // display image
+		{
+			unsigned user_file_idx = 0;
+
+			if (aod_camera.getNumberOfFilesInFileList() == 0)
+			{
+				DSTATUS("File list is empty.");
+				break;
+			}
+
+			do
+			{
+				std::cout << "> Enter file index to display [0-"
+						  << aod_camera.getNumberOfFilesInFileList() - 1
+						  << "]: ";
+				//
+				std::cin.clear();
+				std::fflush(stdin);
+				getline(cin, s);
+				if (!(std::stringstream(s) >> user_file_idx))
+					user_file_idx = aod_camera.getNumberOfFilesInFileList() - 1;
+			} while (user_file_idx >= aod_camera.getNumberOfFilesInFileList());
+
+			aod_camera.getFileFromCamera(user_file_idx, "./__temp.jpg");
+
+			if (aod_camera.getLastError() == ErrorCode::SysCommonErr::Success)
+			{
+				int max_wait_count = 0;
+				while (!aod_camera.isFileTransferComplete()
+					   && max_wait_count < 10)
+				{
+					max_wait_count++;
+					OsdkOsal_TaskSleepMs(500);
+				}
+
+				if (max_wait_count < 10)
+					DSTATUS("File download complete.");
+				else
+					DSTATUS("File download timed out!");
+			}
 			break;
+		}
+		case 'r':
+		{
+			char video_source;
+			do
+			{
+				std::cout << "> Select video source [W ide, Z oom, T hermal]: ";
+				std::cin.clear();
+				std::fflush(stdin);
+				getline(cin, s);
+				if (!(std::stringstream(s) >> video_source))
+					std::cout << "Invalid option!" << std::endl;
+			} while (video_source != 'W' && video_source != 'w'
+					 && video_source != 'Z' && video_source != 'z'
+					 && video_source != 'T' && video_source != 't');
+
+			LiveView::LiveViewCameraSource cam_src;
+
+			switch (video_source)
+			{
+			case 'W':
+			case 'w':
+				cam_src = LiveView::LiveViewCameraSource::
+					OSDK_CAMERA_SOURCE_H20T_WIDE;
+				DSTATUS("Selected camera source: wide");
+				break;
+			case 'Z':
+			case 'z':
+				cam_src = LiveView::LiveViewCameraSource::
+					OSDK_CAMERA_SOURCE_H20T_ZOOM;
+				DSTATUS("Selected camera source: zoom");
+				break;
+			case 'T':
+			case 't':
+				cam_src =
+					LiveView::LiveViewCameraSource::OSDK_CAMERA_SOURCE_H20T_IR;
+				DSTATUS("Selected camera source: ir");
+				break;
+			}
+
+			aod_camera.changeVideoSource(cam_src);
+
+			aod_camera.startVideoStream();
+
+			DSTATUS(
+				"Sleeping 30 seconds while recording stream asynchronously.");
+
+			unsigned int seconds_elapsed = 0;
+
+			while (seconds_elapsed < 30)
+			{
+				sleep(1);
+				seconds_elapsed++;
+				std::cout << "." << std::flush;
+			}
+			std::cout << std::endl;
+
+			aod_camera.stopVideoStream();
+			break;
+		}
+		case 'q':
+			run_thread = false;
+			t1.join();
+			DSTATUS("Good bye!");
+			return 0;
 		default:
+			DSTATUS("Unnown or unimplemented command (%c)!", user_input);
 			break;
 		}
 
