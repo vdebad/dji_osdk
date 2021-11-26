@@ -33,6 +33,7 @@ set(DJIOSDK_VERSION
 add_definitions(-DDJIOSDK_MAJOR_VERSION=4)
 add_definitions(-DDJIOSDK_MINOR_VERSION=1)
 add_definitions(-DDJIOSDK_PATCH_VERSION=0)
+add_definitions(-DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
 
 add_definitions(-DDJIOSDK_IS_DEBUG=1)
 
